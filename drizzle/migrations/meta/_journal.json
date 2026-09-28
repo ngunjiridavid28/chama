@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1790063779583,
+      "tag": "0000_chama_core_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790064000000,
+      "tag": "0001_member_status_and_auth_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790065000000,
+      "tag": "0002_kyc_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790066000000,
+      "tag": "0003_mpesa_contributions_and_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790067000000,
+      "tag": "0004_loans_and_merry_go_round",
+      "breakpoints": true
+    }
+  ]
+}

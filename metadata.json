@@ -1,0 +1,6 @@
+{
+  "name": "Chama Mkononi",
+  "description": "Digital Chama management platform for community savings, loans, welfare contributions, and meetings.",
+  "requestFramePermissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
