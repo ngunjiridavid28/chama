@@ -7,7 +7,7 @@ import { Screen } from "@/components/chama/Screen";
 import { BigButton } from "@/components/chama/BigButton";
 import { getHome, saveRsvp } from "@/lib/chama.functions";
 import { useChamaQuery } from "@/lib/useChamaQuery";
-import { formatDay, ksh, useLang } from "@/lib/i18n";
+import { formatDay, getRoleWord, ksh, useLang } from "@/lib/i18n";
 import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/_authenticated/nyumbani")({
@@ -24,13 +24,6 @@ export const Route = createFileRoute("/_authenticated/nyumbani")({
   }),
   component: Home,
 });
-
-const roleWords: Record<string, string> = {
-  chairperson: "Mwenyekiti",
-  treasurer: "Mweka hazina",
-  secretary: "Katibu",
-  member: "Mwanachama",
-};
 
 function Home() {
   const fetchHome = useServerFn(getHome);
@@ -268,7 +261,7 @@ function Home() {
 
       <div className="mt-6">
         <p className="text-lg text-foreground/70">
-          {t("greeting")}, {data.member.name} 👋 · {roleWords[data.member.role]}
+          {t("greeting")}, {data.member.name} 👋 · {getRoleWord(data.member.role, lang)}
         </p>
         <div className="mt-3 rounded-3xl border border-card/70 bg-card/70 p-5 backdrop-blur-md">
           <p className="text-sm font-bold uppercase tracking-[0.15em] text-brand">
@@ -343,7 +336,9 @@ function Home() {
                   <p className="text-base text-muted-foreground">{data.meeting.location}</p>
                 </>
               ) : (
-                <p className="text-lg font-bold">Hakuna mkutano bado</p>
+                <p className="text-lg font-bold">
+                  {lang === "sw" ? "Hakuna mkutano uliopangwa bado" : "No meetings scheduled yet"}
+                </p>
               )}
             </div>
           </div>

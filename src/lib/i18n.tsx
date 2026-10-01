@@ -63,20 +63,53 @@ export type TKey = keyof typeof dict;
 type Ctx = { lang: Lang; setLang: (l: Lang) => void; t: (k: TKey) => string };
 const LangCtx = createContext<Ctx>({ lang: "sw", setLang: () => {}, t: (k) => dict[k].sw });
 
+let memoryLang: Lang = "sw";
+
+function getInitialLang(): Lang {
+  if (typeof window === "undefined") return "sw";
+  try {
+    const saved = window.localStorage.getItem("chama_lang");
+    if (saved === "en" || saved === "sw") return saved;
+  } catch {
+    // iframe partition fallback
+  }
+  return memoryLang;
+}
+
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  const [lang, setLangState] = useState<Lang>("sw");
+  const [lang, setLangState] = useState<Lang>(getInitialLang);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem("chama_lang");
-    if (saved === "en" || saved === "sw") setLangState(saved);
+    try {
+      const saved = window.localStorage.getItem("chama_lang");
+      if (saved === "en" || saved === "sw") {
+        setLangState(saved);
+        memoryLang = saved;
+      }
+    } catch {
+      // ignore storage access errors
+    }
   }, []);
 
   const setLang = useCallback((l: Lang) => {
     setLangState(l);
-    window.localStorage.setItem("chama_lang", l);
+    memoryLang = l;
+    try {
+      window.localStorage.setItem("chama_lang", l);
+    } catch {
+      // storage blocked in iframe
+    }
+    // Update html lang attribute
+    try {
+      if (typeof document !== "undefined") {
+        document.documentElement.lang = l;
+      }
+    } catch {
+      // ignore
+    }
   }, []);
 
-  const t = useCallback((k: TKey) => dict[k][lang], [lang]);
+  const t = useCallback((k: TKey) => dict[k]?.[lang] ?? dict[k]?.sw ?? k, [lang]);
 
   return <LangCtx.Provider value={{ lang, setLang, t }}>{children}</LangCtx.Provider>;
 }
@@ -112,4 +145,12 @@ export function formatDay(dateStr: string | null | undefined, lang: Lang) {
   if (Number.isNaN(d.getTime())) return dateStr;
   if (lang === "sw") return `${swDays[d.getDay()]} · ${d.getDate()} ${swMonths[d.getMonth()]}`;
   return d.toLocaleDateString("en-KE", { weekday: "long", day: "numeric", month: "long" });
+}
+
+export function getRoleWord(role: string | null | undefined, lang: Lang): string {
+  const r = (role || "").toLowerCase();
+  if (r === "chairperson") return lang === "sw" ? "Mwenyekiti" : "Chairperson";
+  if (r === "treasurer") return lang === "sw" ? "Mweka Hazina" : "Treasurer";
+  if (r === "secretary") return lang === "sw" ? "Katibu" : "Secretary";
+  return lang === "sw" ? "Mwanachama" : "Member";
 }

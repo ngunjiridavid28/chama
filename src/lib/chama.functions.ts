@@ -572,28 +572,73 @@ export const getLoans = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
-    if (!me) return { member: null, loans: [] } as const;
-    const [{ data: loans }, { data: reps }] = await Promise.all([
+    if (!me) return { member: null, loans: [], members: [] } as const;
+
+    const [{ data: loans }, { data: reps }, { data: membersRes }] = await Promise.all([
       sb
         .from("loans")
         .select(
-          "id, amount, reason, status, due_date, requested_at, member_id, chama_members(display_name)",
+          "id, amount, reason, status, due_date, requested_at, member_id, guarantor_id, interest_rate, duration_months, decided_at, decided_by, chama_members(display_name)",
         )
         .eq("chama_id", me.chama_id)
         .order("requested_at", { ascending: false }),
-      sb.from("loan_repayments").select("loan_id, amount, paid_on").eq("chama_id", me.chama_id),
+      sb
+        .from("loan_repayments")
+        .select("loan_id, amount, paid_on, method, mpesa_reference")
+        .eq("chama_id", me.chama_id)
+        .order("paid_on", { ascending: false }),
+      sb
+        .from("chama_members")
+        .select("id, display_name, phone, role")
+        .eq("chama_id", me.chama_id)
+        .neq("status", "pending")
+        .order("display_name"),
     ]);
-    const repayments = (reps ?? []) as { loan_id: string; amount: number }[];
+
+    const repayments = (reps ?? []) as {
+      loan_id: string;
+      amount: number;
+      paid_on: string;
+      method?: string;
+      mpesa_reference?: string | null;
+    }[];
+    const membersList = (membersRes ?? []) as {
+      id: string;
+      display_name: string;
+      phone: string | null;
+      role: string;
+    }[];
+
     const withTotals = ((loans ?? []) as any[]).map((l) => {
-      const paid = sum(repayments.filter((r) => r.loan_id === l.id));
+      const loanReps = repayments.filter((r) => r.loan_id === l.id);
+      const paid = sum(loanReps);
+      const interestPct = Number(l.interest_rate ?? 10);
+      const principal = Number(l.amount);
+      const interestAmount = Math.round((principal * interestPct) / 100);
+      const totalDue = principal + interestAmount;
+      const remaining = Math.max(totalDue - paid, 0);
+
+      const guarantor = membersList.find((m) => m.id === l.guarantor_id);
+
       return {
         ...l,
+        principal,
+        interestPct,
+        interestAmount,
+        totalDue,
         paid,
-        remaining: Math.max(Number(l.amount) - paid, 0),
+        remaining,
+        repayments: loanReps,
+        guarantorName: guarantor?.display_name || null,
         mine: l.member_id === me.id,
       };
     });
-    return { member: { id: me.id, role: me.role }, loans: withTotals } as const;
+
+    return {
+      member: { id: me.id, role: me.role, name: me.display_name },
+      loans: withTotals,
+      members: membersList,
+    } as const;
   });
 
 export const requestLoan = createServerFn({ method: "POST" })
@@ -603,6 +648,9 @@ export const requestLoan = createServerFn({ method: "POST" })
       .object({
         amount: z.number().positive().max(1_000_000),
         reason: z.string().max(200).optional(),
+        guarantorId: z.string().uuid().optional(),
+        durationMonths: z.number().int().min(1).max(24).default(1),
+        interestRate: z.number().min(0).max(100).default(10),
       })
       .parse(d),
   )
@@ -610,15 +658,40 @@ export const requestLoan = createServerFn({ method: "POST" })
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me) throw new Error("not_a_member");
-    const { error } = await sb.from("loans").insert({
-      chama_id: me.chama_id,
-      member_id: me.id,
-      amount: data.amount,
-      reason: data.reason ?? null,
-      status: "pending",
-    });
+
+    // Calculate initial target due date
+    const targetDate = new Date();
+    targetDate.setMonth(targetDate.getMonth() + data.durationMonths);
+    const dueDateStr = targetDate.toISOString().slice(0, 10);
+
+    const { data: inserted, error } = await sb
+      .from("loans")
+      .insert({
+        chama_id: me.chama_id,
+        member_id: me.id,
+        amount: data.amount,
+        reason: data.reason ?? null,
+        guarantor_id: data.guarantorId || null,
+        duration_months: data.durationMonths,
+        interest_rate: data.interestRate,
+        due_date: dueDateStr,
+        status: "pending",
+      })
+      .select("id")
+      .single();
+
     if (error) throw new Error(error.message);
-    return { ok: true };
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "REQUEST_LOAN",
+      entity: "loans",
+      entity_id: inserted.id,
+      details: { amount: data.amount, reason: data.reason, duration: data.durationMonths },
+    });
+
+    return { ok: true, id: inserted.id };
   });
 
 export const decideLoan = createServerFn({ method: "POST" })
@@ -632,6 +705,7 @@ export const decideLoan = createServerFn({ method: "POST" })
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me || !(OFFICIALS as readonly string[]).includes(me.role)) throw new Error("not_allowed");
+
     const { data: row, error } = await sb
       .from("loans")
       .update({
@@ -641,34 +715,68 @@ export const decideLoan = createServerFn({ method: "POST" })
         due_date: data.approve ? (data.dueDate ?? null) : null,
       })
       .eq("id", data.id)
-      .select("id, amount")
+      .eq("chama_id", me.chama_id)
+      .select("id, amount, member_id, chama_members(display_name)")
       .single();
+
     if (error) throw new Error(error.message);
+
+    const borrowerName = (row as any)?.chama_members?.display_name || "Mwanachama";
+
     if (data.approve) {
       await sb.from("ledger_entries").insert({
         chama_id: me.chama_id,
         kind: "out",
         category: "mkopo",
         amount: row.amount,
-        description: "Mkopo umetolewa",
+        description: `Mkopo umetolewa kwa ${borrowerName}`,
         recorded_by: userId,
         approved_by: userId,
         source_table: "loans",
         source_id: row.id,
       });
+
+      await sb.from("audit_logs").insert({
+        chama_id: me.chama_id,
+        actor_id: userId,
+        action: "APPROVE_LOAN",
+        entity: "loans",
+        entity_id: row.id,
+        details: { amount: row.amount, borrower: borrowerName },
+      });
+    } else {
+      await sb.from("audit_logs").insert({
+        chama_id: me.chama_id,
+        actor_id: userId,
+        action: "REJECT_LOAN",
+        entity: "loans",
+        entity_id: row.id,
+        details: { amount: row.amount, borrower: borrowerName },
+      });
     }
+
     return { ok: true };
   });
 
 export const recordRepayment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d) =>
-    z.object({ loanId: z.string().uuid(), amount: z.number().positive() }).parse(d),
+    z
+      .object({
+        loanId: z.string().uuid(),
+        amount: z.number().positive(),
+        method: z.enum(["mpesa", "cash", "bank"]).default("mpesa"),
+        mpesaReference: z.string().optional(),
+      })
+      .parse(d),
   )
   .handler(async ({ data, context }) => {
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me || !(OFFICIALS as readonly string[]).includes(me.role)) throw new Error("not_allowed");
+
+    const cleanRef = data.mpesaReference ? data.mpesaReference.trim().toUpperCase() : null;
+
     const { data: row, error } = await sb
       .from("loan_repayments")
       .insert({
@@ -676,22 +784,194 @@ export const recordRepayment = createServerFn({ method: "POST" })
         chama_id: me.chama_id,
         amount: data.amount,
         recorded_by: userId,
+        method: data.method,
+        mpesa_reference: cleanRef,
       })
       .select("id")
       .single();
+
     if (error) throw new Error(error.message);
+
+    // Fetch loan details and borrower name for double-entry ledger & check payoff
+    const { data: loan } = await sb
+      .from("loans")
+      .select("id, amount, interest_rate, member_id, chama_members(display_name)")
+      .eq("id", data.loanId)
+      .single();
+
+    const borrowerName = (loan as any)?.chama_members?.display_name || "Mwanachama";
+    const refText = cleanRef ? `M-Pesa: ${cleanRef}` : data.method;
+
     await sb.from("ledger_entries").insert({
       chama_id: me.chama_id,
       kind: "in",
       category: "marejesho",
       amount: data.amount,
-      description: "Marejesho ya mkopo",
+      description: `Marejesho ya mkopo - ${borrowerName} (${refText})`,
       recorded_by: userId,
       approved_by: userId,
       source_table: "loan_repayments",
       source_id: row.id,
     });
-    return { ok: true };
+
+    // Check if fully repaid
+    const { data: allReps } = await sb
+      .from("loan_repayments")
+      .select("amount")
+      .eq("loan_id", data.loanId);
+
+    const totalPaid = sum(allReps ?? []);
+    const interest = Math.round(
+      (Number(loan?.amount ?? 0) * Number(loan?.interest_rate ?? 10)) / 100,
+    );
+    const totalPayable = Number(loan?.amount ?? 0) + interest;
+
+    if (totalPaid >= totalPayable) {
+      await sb.from("loans").update({ status: "repaid" }).eq("id", data.loanId);
+    }
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "RECORD_LOAN_REPAYMENT",
+      entity: "loan_repayments",
+      entity_id: row.id,
+      details: { amount: data.amount, loanId: data.loanId, reference: cleanRef },
+    });
+
+    return { ok: true, totalPaid, totalPayable, isFullyRepaid: totalPaid >= totalPayable };
+  });
+
+/* ------------------------------------------------------------------ */
+/* Merry-Go-Round Engine (Table Banking / Rotation Payouts)            */
+/* ------------------------------------------------------------------ */
+
+export const getMerryGoRound = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me) return { member: null, slots: [], potAmount: 0 } as const;
+
+    const [{ data: slotsData }, { data: membersData }] = await Promise.all([
+      sb
+        .from("merry_go_round_slots")
+        .select(
+          "id, member_id, cycle_number, rotation_order, payout_month, payout_amount, status, paid_at, chama_members(display_name, phone)",
+        )
+        .eq("chama_id", me.chama_id)
+        .order("rotation_order", { ascending: true }),
+      sb
+        .from("chama_members")
+        .select("id, display_name, phone, role")
+        .eq("chama_id", me.chama_id)
+        .neq("status", "pending")
+        .order("display_name"),
+    ]);
+
+    const activeMembers = (membersData ?? []) as any[];
+    const monthlyRate = Number(me.chamas.monthly_contribution);
+    const totalPot = monthlyRate * (activeMembers.length || 1);
+
+    const slots = ((slotsData ?? []) as any[]).map((s) => ({
+      ...s,
+      displayName: s.chama_members?.display_name || "Mwanachama",
+      phone: s.chama_members?.phone || null,
+      isMe: s.member_id === me.id,
+    }));
+
+    return {
+      member: { id: me.id, role: me.role, name: me.display_name },
+      chama: { name: me.chamas.name, monthly: monthlyRate },
+      potAmount: totalPot,
+      slots,
+      members: activeMembers,
+    } as const;
+  });
+
+export const markMerryGoRoundPayout = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) => z.object({ slotId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me || !(OFFICIALS as readonly string[]).includes(me.role)) throw new Error("not_allowed");
+
+    const now = new Date().toISOString();
+    const { data: slot, error } = await sb
+      .from("merry_go_round_slots")
+      .update({ status: "paid", paid_at: now })
+      .eq("id", data.slotId)
+      .eq("chama_id", me.chama_id)
+      .select("id, member_id, payout_amount, payout_month, chama_members(display_name)")
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    const recipient = (slot as any)?.chama_members?.display_name || "Mwanachama";
+
+    // Reconcile into double-entry ledger
+    await sb.from("ledger_entries").insert({
+      chama_id: me.chama_id,
+      kind: "out",
+      category: "merry_go_round",
+      amount: slot.payout_amount,
+      description: `Malipo ya Merry-Go-Round (${slot.payout_month}) kwa ${recipient}`,
+      recorded_by: userId,
+      approved_by: userId,
+      source_table: "merry_go_round_slots",
+      source_id: slot.id,
+    });
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "PAYOUT_MERRY_GO_ROUND",
+      entity: "merry_go_round_slots",
+      entity_id: slot.id,
+      details: { amount: slot.payout_amount, recipient, month: slot.payout_month },
+    });
+
+    return { ok: true, recipient, amount: slot.payout_amount };
+  });
+
+export const initializeMerryGoRound = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) => z.object({ cycleNumber: z.number().int().default(1) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me || !(OFFICIALS as readonly string[]).includes(me.role)) throw new Error("not_allowed");
+
+    const { data: members } = await sb
+      .from("chama_members")
+      .select("id")
+      .eq("chama_id", me.chama_id)
+      .neq("status", "pending")
+      .order("joined_at", { ascending: true });
+
+    if (!members || members.length === 0) throw new Error("no_members");
+
+    const potAmount = Number(me.chamas.monthly_contribution) * members.length;
+    const now = new Date();
+
+    // Generate slots for each member sequentially across coming months
+    for (let i = 0; i < members.length; i++) {
+      const payoutDate = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      const monthStr = `${payoutDate.getFullYear()}-${String(payoutDate.getMonth() + 1).padStart(2, "0")}`;
+
+      await sb.from("merry_go_round_slots").insert({
+        chama_id: me.chama_id,
+        member_id: members[i].id,
+        cycle_number: data.cycleNumber,
+        rotation_order: i + 1,
+        payout_month: monthStr,
+        payout_amount: potAmount,
+        status: "pending",
+      });
+    }
+
+    return { ok: true, count: members.length };
   });
 
 /* ------------------------------------------------------------------ */
@@ -703,39 +983,58 @@ export const getMeetings = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
-    if (!me) return { member: null, meetings: [] } as const;
-    const { data } = await sb
-      .from("meetings")
-      .select("id, title, meet_on, meet_at, location, agenda, minutes")
-      .eq("chama_id", me.chama_id)
-      .order("meet_on", { ascending: false })
-      .limit(30);
-    const { data: rsvps } = await sb
-      .from("meeting_attendance")
-      .select("meeting_id, member_id, response, chama_members(display_name)")
-      .eq("chama_id", me.chama_id);
+    if (!me) return { member: null, meetings: [], rsvps: [], members: [] } as const;
+
+    const [meetingsRes, rsvpsRes, membersRes] = await Promise.all([
+      sb
+        .from("meetings")
+        .select("id, title, meet_on, meet_at, location, agenda, minutes, created_by, created_at")
+        .eq("chama_id", me.chama_id)
+        .order("meet_on", { ascending: false })
+        .limit(30),
+      sb
+        .from("meeting_attendance")
+        .select("id, meeting_id, member_id, response, attended, chama_members(display_name, phone)")
+        .eq("chama_id", me.chama_id),
+      sb
+        .from("chama_members")
+        .select("id, display_name, phone, role")
+        .eq("chama_id", me.chama_id)
+        .neq("status", "pending")
+        .order("display_name"),
+    ]);
+
     return {
-      member: { id: me.id, role: me.role },
-      meetings: (data ?? []) as any[],
-      rsvps: (rsvps ?? []) as any[],
+      member: { id: me.id, role: me.role, name: me.display_name },
+      chama: { name: me.chamas.name },
+      meetings: (meetingsRes.data ?? []) as any[],
+      rsvps: (rsvpsRes.data ?? []) as any[],
+      members: (membersRes.data ?? []) as any[],
     } as const;
   });
 
 export const saveRsvp = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d) =>
-    z.object({ meetingId: z.string().uuid(), response: z.enum(["coming", "not_coming"]) }).parse(d),
+    z
+      .object({
+        meetingId: z.string().uuid(),
+        response: z.enum(["coming", "not_coming"]),
+      })
+      .parse(d),
   )
   .handler(async ({ data, context }) => {
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me) throw new Error("not_a_member");
+
     const { data: existing } = await sb
       .from("meeting_attendance")
       .select("id")
       .eq("meeting_id", data.meetingId)
       .eq("member_id", me.id)
       .maybeSingle();
+
     if (existing) {
       await sb
         .from("meeting_attendance")
@@ -749,6 +1048,48 @@ export const saveRsvp = createServerFn({ method: "POST" })
         response: data.response,
       });
     }
+
+    return { ok: true };
+  });
+
+export const toggleAttendanceRollCall = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) =>
+    z
+      .object({
+        meetingId: z.string().uuid(),
+        memberId: z.string().uuid(),
+        attended: z.boolean(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me || !["secretary", "chairperson"].includes(me.role)) throw new Error("not_allowed");
+
+    const { data: existing } = await sb
+      .from("meeting_attendance")
+      .select("id")
+      .eq("meeting_id", data.meetingId)
+      .eq("member_id", data.memberId)
+      .maybeSingle();
+
+    if (existing) {
+      await sb
+        .from("meeting_attendance")
+        .update({ attended: data.attended, updated_at: new Date().toISOString() })
+        .eq("id", existing.id);
+    } else {
+      await sb.from("meeting_attendance").insert({
+        meeting_id: data.meetingId,
+        member_id: data.memberId,
+        chama_id: me.chama_id,
+        response: "coming",
+        attended: data.attended,
+      });
+    }
+
     return { ok: true };
   });
 
@@ -769,17 +1110,33 @@ export const createMeeting = createServerFn({ method: "POST" })
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me || !["secretary", "chairperson"].includes(me.role)) throw new Error("not_allowed");
-    const { error } = await sb.from("meetings").insert({
-      chama_id: me.chama_id,
-      title: data.title,
-      meet_on: data.meetOn,
-      meet_at: data.meetAt,
-      location: data.location,
-      agenda: data.agenda ?? null,
-      created_by: userId,
-    });
+
+    const { data: meeting, error } = await sb
+      .from("meetings")
+      .insert({
+        chama_id: me.chama_id,
+        title: data.title,
+        meet_on: data.meetOn,
+        meet_at: data.meetAt,
+        location: data.location,
+        agenda: data.agenda ?? null,
+        created_by: userId,
+      })
+      .select("id")
+      .single();
+
     if (error) throw new Error(error.message);
-    return { ok: true };
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "CREATE_MEETING",
+      entity: "meetings",
+      entity_id: meeting.id,
+      details: { title: data.title, date: data.meetOn, location: data.location },
+    });
+
+    return { ok: true, id: meeting.id };
   });
 
 export const saveMinutes = createServerFn({ method: "POST" })
@@ -791,11 +1148,23 @@ export const saveMinutes = createServerFn({ method: "POST" })
     const { sb, userId } = authCtx(context);
     const me = await currentMember(sb, userId);
     if (!me || !["secretary", "chairperson"].includes(me.role)) throw new Error("not_allowed");
+
     const { error } = await sb
       .from("meetings")
       .update({ minutes: data.minutes })
-      .eq("id", data.meetingId);
+      .eq("id", data.meetingId)
+      .eq("chama_id", me.chama_id);
+
     if (error) throw new Error(error.message);
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "SAVE_MEETING_MINUTES",
+      entity: "meetings",
+      entity_id: data.meetingId,
+    });
+
     return { ok: true };
   });
 
@@ -1110,4 +1479,123 @@ export const postAnnouncement = createServerFn({ method: "POST" })
       .insert({ chama_id: me.chama_id, message: data.message, created_by: userId });
     if (error) throw new Error(error.message);
     return { ok: true };
+  });
+
+/* ------------------------------------------------------------------ */
+/* Kitabu General Ledger & Expense Records                             */
+/* ------------------------------------------------------------------ */
+
+export const getKitabuLedger = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me)
+      return {
+        member: null,
+        entries: [],
+        totals: {
+          in: 0,
+          out: 0,
+          balance: 0,
+          michango: 0,
+          mikopo: 0,
+          marejesho: 0,
+          merryGoRound: 0,
+          gharama: 0,
+        },
+      } as const;
+
+    const [ledgerRes, membersRes] = await Promise.all([
+      sb
+        .from("ledger_entries")
+        .select(
+          "id, kind, category, amount, description, occurred_on, recorded_by, approved_by, source_table, source_id",
+        )
+        .eq("chama_id", me.chama_id)
+        .order("occurred_on", { ascending: false }),
+      sb
+        .from("chama_members")
+        .select("id, user_id, display_name, role")
+        .eq("chama_id", me.chama_id),
+    ]);
+
+    const membersMap = new Map(
+      ((membersRes.data ?? []) as any[]).map((m) => [m.user_id || m.id, m.display_name]),
+    );
+
+    const entries = ((ledgerRes.data ?? []) as any[]).map((e) => ({
+      ...e,
+      amount: Number(e.amount),
+      recordedByName: membersMap.get(e.recorded_by) || "Msimamizi",
+      approvedByName: membersMap.get(e.approved_by) || null,
+    }));
+
+    const totalIn = sum(entries.filter((e) => e.kind === "in"));
+    const totalOut = sum(entries.filter((e) => e.kind === "out"));
+
+    return {
+      member: { id: me.id, role: me.role, name: me.display_name },
+      chama: { id: me.chamas.id, name: me.chamas.name },
+      entries,
+      totals: {
+        in: totalIn,
+        out: totalOut,
+        balance: totalIn - totalOut,
+        michango: sum(entries.filter((e) => e.category === "michango")),
+        mikopo: sum(entries.filter((e) => e.category === "mkopo")),
+        marejesho: sum(entries.filter((e) => e.category === "marejesho")),
+        merryGoRound: sum(entries.filter((e) => e.category === "merry_go_round")),
+        gharama: sum(entries.filter((e) => e.category === "gharama")),
+      },
+    } as const;
+  });
+
+export const recordExpenseEntry = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) =>
+    z
+      .object({
+        category: z.enum(["gharama", "adhabu", "faida", "mengineyo"]).default("gharama"),
+        kind: z.enum(["in", "out"]).default("out"),
+        amount: z.number().positive(),
+        description: z.string().min(2).max(250),
+        occurredOn: z.string().optional(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const { sb, userId } = authCtx(context);
+    const me = await currentMember(sb, userId);
+    if (!me || !(OFFICIALS as readonly string[]).includes(me.role)) throw new Error("not_allowed");
+
+    const dateStr = data.occurredOn || new Date().toISOString().slice(0, 10);
+
+    const { data: row, error } = await sb
+      .from("ledger_entries")
+      .insert({
+        chama_id: me.chama_id,
+        kind: data.kind,
+        category: data.category,
+        amount: data.amount,
+        description: data.description,
+        occurred_on: dateStr,
+        recorded_by: userId,
+        approved_by: userId,
+      })
+      .select("id")
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    await sb.from("audit_logs").insert({
+      chama_id: me.chama_id,
+      actor_id: userId,
+      action: "RECORD_LEDGER_EXPENSE",
+      entity: "ledger_entries",
+      entity_id: row.id,
+      details: { amount: data.amount, category: data.category, description: data.description },
+    });
+
+    return { ok: true, id: row.id };
   });

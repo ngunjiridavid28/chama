@@ -19,20 +19,42 @@ export function Screen({ children, nav = true }: { children: ReactNode; nav?: bo
 
 /** Header with a back arrow and a big page title, used on every inner screen. */
 export function PageHeader({ title, subtitle }: { title: string; subtitle?: string | undefined }) {
-  const { t } = useLang();
+  const { t, lang, setLang } = useLang();
   return (
-    <header className="flex items-center gap-3">
-      <Link
-        to="/nyumbani"
-        aria-label={t("back")}
-        className="grid size-12 shrink-0 place-items-center rounded-2xl border border-card/70 bg-card/70 text-2xl text-brand-ink backdrop-blur-md"
-      >
-        ←
-      </Link>
-      <div>
-        <h1 className="font-display text-2xl font-extrabold leading-tight">{title}</h1>
-        {subtitle ? <p className="text-base text-muted-foreground">{subtitle}</p> : null}
+    <header className="flex items-center justify-between gap-3">
+      <div className="flex items-center gap-3">
+        <Link
+          to="/nyumbani"
+          aria-label={t("back")}
+          className="grid size-12 shrink-0 place-items-center rounded-2xl border border-card/70 bg-card/70 text-2xl text-brand-ink backdrop-blur-md transition hover:bg-card"
+        >
+          ←
+        </Link>
+        <div>
+          <h1 className="font-display text-2xl font-extrabold leading-tight">{title}</h1>
+          {subtitle ? <p className="text-base text-muted-foreground">{subtitle}</p> : null}
+        </div>
       </div>
+
+      <button
+        type="button"
+        onClick={() => setLang(lang === "sw" ? "en" : "sw")}
+        className="flex items-center gap-1.5 rounded-full border border-brand/20 bg-card px-3 py-1.5 text-xs font-bold text-brand shadow-sm transition hover:bg-brand/10"
+        aria-label="Toggle language"
+        title={lang === "sw" ? "Switch to English" : "Badilisha kwa Kiswahili"}
+      >
+        <span
+          className={lang === "sw" ? "font-black underline text-brand" : "text-muted-foreground"}
+        >
+          SW
+        </span>
+        <span className="text-muted-foreground">/</span>
+        <span
+          className={lang === "en" ? "font-black underline text-brand" : "text-muted-foreground"}
+        >
+          EN
+        </span>
+      </button>
     </header>
   );
 }

@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-
 export interface MockChama {
   id: string;
   name: string;
@@ -72,6 +69,9 @@ export interface MockLoan {
   decided_at?: string | null;
   decided_by?: string | null;
   requested_at: string;
+  guarantor_id?: string | null;
+  interest_rate?: number;
+  duration_months?: number;
 }
 
 export interface MockRepayment {
@@ -81,6 +81,21 @@ export interface MockRepayment {
   amount: number;
   paid_on: string;
   recorded_by?: string | null;
+  method?: string;
+  mpesa_reference?: string | null;
+}
+
+export interface MockMerryGoRoundSlot {
+  id: string;
+  chama_id: string;
+  member_id: string;
+  cycle_number: number;
+  rotation_order: number;
+  payout_month: string;
+  payout_amount: number;
+  status: "pending" | "paid";
+  paid_at?: string | null;
+  created_at: string;
 }
 
 export interface MockMeeting {
@@ -101,6 +116,7 @@ export interface MockAttendance {
   member_id: string;
   chama_id: string;
   response: "coming" | "not_coming";
+  attended?: boolean | null;
   updated_at?: string;
 }
 
@@ -147,6 +163,7 @@ export interface MockDataStore {
   ledger_entries: MockLedgerEntry[];
   loans: MockLoan[];
   loan_repayments: MockRepayment[];
+  merry_go_round_slots: MockMerryGoRoundSlot[];
   meetings: MockMeeting[];
   meeting_attendance: MockAttendance[];
   announcements: MockAnnouncement[];
@@ -164,7 +181,7 @@ function getInitialData(): MockDataStore {
     chamas: [
       {
         id: "11111111-1111-1111-1111-111111111111",
-        name: "Tupendane Women Group",
+        name: "Tupendane Investment Club",
         join_code: "TUPENDANE",
         monthly_contribution: 500,
         currency: "KSh",
@@ -175,15 +192,15 @@ function getInitialData(): MockDataStore {
       {
         id: "21111111-1111-1111-1111-111111111111",
         chama_id: "11111111-1111-1111-1111-111111111111",
-        user_id: "user-mama-wanjiku",
-        display_name: "Mama Wanjiku",
+        user_id: "user-david-kimani",
+        display_name: "David Kimani",
         phone: "0722000001",
         role: "chairperson",
         status: "approved",
         id_number: "22345678",
         id_type: "national_id",
         dob: "1982-05-14",
-        sex: "female",
+        sex: "male",
         kyc_verified: true,
         kyc_verified_at: "2026-01-02T10:00:00Z",
         joined_at: "2026-01-01T00:00:00Z",
@@ -191,8 +208,8 @@ function getInitialData(): MockDataStore {
       {
         id: "22222222-2222-2222-2222-222222222222",
         chama_id: "11111111-1111-1111-1111-111111111111",
-        user_id: "user-mama-akinyi",
-        display_name: "Mama Akinyi",
+        user_id: "user-grace-achieng",
+        display_name: "Grace Achieng",
         phone: "0722000002",
         role: "treasurer",
         status: "approved",
@@ -207,15 +224,15 @@ function getInitialData(): MockDataStore {
       {
         id: "23333333-3333-3333-3333-333333333333",
         chama_id: "11111111-1111-1111-1111-111111111111",
-        user_id: "user-mama-njeri",
-        display_name: "Mama Njeri",
+        user_id: "user-joseph-mwangi",
+        display_name: "Joseph Mwangi",
         phone: "0722000003",
         role: "secretary",
         status: "approved",
         id_number: "26781290",
         id_type: "national_id",
         dob: "1988-12-03",
-        sex: "female",
+        sex: "male",
         kyc_verified: true,
         kyc_verified_at: "2026-01-02T11:00:00Z",
         joined_at: "2026-01-01T00:00:00Z",
@@ -223,8 +240,8 @@ function getInitialData(): MockDataStore {
       {
         id: "24444444-4444-4444-4444-444444444444",
         chama_id: "11111111-1111-1111-1111-111111111111",
-        user_id: "user-mama-wambui",
-        display_name: "Mama Wambui",
+        user_id: "user-sarah-wambui",
+        display_name: "Sarah Wambui",
         phone: "0722000004",
         role: "member",
         status: "approved",
@@ -232,31 +249,31 @@ function getInitialData(): MockDataStore {
         id_type: "national_id",
         dob: "1990-03-18",
         sex: "female",
-        kyc_verified: false,
+        kyc_verified: true,
         joined_at: "2026-01-01T00:00:00Z",
       },
       {
         id: "25555555-5555-5555-5555-555555555555",
         chama_id: "11111111-1111-1111-1111-111111111111",
         user_id: null,
-        display_name: "Mama Atieno",
+        display_name: "Brian Omondi",
         phone: "0722000005",
         role: "member",
         status: "approved",
-        id_number: null,
-        kyc_verified: false,
+        id_number: "31092834",
+        kyc_verified: true,
         joined_at: "2026-01-01T00:00:00Z",
       },
       {
         id: "26666666-6666-6666-6666-666666666666",
         chama_id: "11111111-1111-1111-1111-111111111111",
         user_id: null,
-        display_name: "Asha Bakari",
+        display_name: "Fatuma Hassan",
         phone: "0722000006",
         role: "member",
         status: "approved",
-        id_number: null,
-        kyc_verified: false,
+        id_number: "33890123",
+        kyc_verified: true,
         joined_at: "2026-01-01T00:00:00Z",
       },
     ],
@@ -327,7 +344,7 @@ function getInitialData(): MockDataStore {
         kind: "out",
         category: "mkopo",
         amount: 20000,
-        description: "Mkopo kwa Mama Wambui",
+        description: "Mkopo kwa Sarah Wambui",
         occurred_on: "2026-07-20",
       },
       {
@@ -336,7 +353,7 @@ function getInitialData(): MockDataStore {
         kind: "in",
         category: "marejesho",
         amount: 5000,
-        description: "Marejesho ya mkopo - Mama Wambui",
+        description: "Marejesho ya mkopo - Sarah Wambui",
         occurred_on: "2026-08-20",
       },
     ],
@@ -371,6 +388,58 @@ function getInitialData(): MockDataStore {
         chama_id: "11111111-1111-1111-1111-111111111111",
         amount: 5000,
         paid_on: "2026-08-20",
+        method: "mpesa",
+        mpesa_reference: "REPAY8932K",
+      },
+    ],
+    merry_go_round_slots: [
+      {
+        id: "mgr1",
+        chama_id: "11111111-1111-1111-1111-111111111111",
+        member_id: "24444444-4444-4444-4444-444444444444",
+        cycle_number: 1,
+        rotation_order: 1,
+        payout_month: "2026-08",
+        payout_amount: 12000,
+        status: "paid",
+        paid_at: "2026-08-30T10:00:00Z",
+        created_at: "2026-07-01T00:00:00Z",
+      },
+      {
+        id: "mgr2",
+        chama_id: "11111111-1111-1111-1111-111111111111",
+        member_id: "21111111-1111-1111-1111-111111111111",
+        cycle_number: 1,
+        rotation_order: 2,
+        payout_month: "2026-09",
+        payout_amount: 12000,
+        status: "paid",
+        paid_at: "2026-09-28T10:00:00Z",
+        created_at: "2026-07-01T00:00:00Z",
+      },
+      {
+        id: "mgr3",
+        chama_id: "11111111-1111-1111-1111-111111111111",
+        member_id: "22222222-2222-2222-2222-222222222222",
+        cycle_number: 1,
+        rotation_order: 3,
+        payout_month: "2026-10",
+        payout_amount: 12000,
+        status: "pending",
+        paid_at: null,
+        created_at: "2026-07-01T00:00:00Z",
+      },
+      {
+        id: "mgr4",
+        chama_id: "11111111-1111-1111-1111-111111111111",
+        member_id: "23333333-3333-3333-3333-333333333333",
+        cycle_number: 1,
+        rotation_order: 4,
+        payout_month: "2026-11",
+        payout_amount: 12000,
+        status: "pending",
+        paid_at: null,
+        created_at: "2026-07-01T00:00:00Z",
       },
     ],
     meetings: [
@@ -380,7 +449,7 @@ function getInitialData(): MockDataStore {
         title: "Mkutano wa mwezi huu",
         meet_on: "2026-10-14",
         meet_at: "17:00",
-        location: "Nyumbani kwa Mama Njeri",
+        location: "Ukumbi wa Jamii / Community Hall",
         agenda: "Michango ya mwezi, mikopo, na mradi wa maji",
         minutes: null,
       },
@@ -401,7 +470,7 @@ function getInitialData(): MockDataStore {
         message:
           "Mikopo ya mwezi huu itafunguliwa tarehe 20. Tafadhali lipa michango kabla ya Jumapili.",
         created_at: todayStr,
-        created_by: "user-mama-wanjiku",
+        created_by: "user-david-kimani",
       },
     ],
     audit_logs: [],
@@ -409,8 +478,6 @@ function getInitialData(): MockDataStore {
     profiles: [],
   };
 }
-
-const STORAGE_FILE = path.join(process.cwd(), ".chama_mock_db.json");
 
 class MockDatabaseService {
   private data: MockDataStore;
@@ -421,23 +488,23 @@ class MockDatabaseService {
 
   private load(): MockDataStore {
     try {
-      if (typeof window === "undefined" && fs.existsSync(STORAGE_FILE)) {
-        const raw = fs.readFileSync(STORAGE_FILE, "utf-8");
-        return JSON.parse(raw);
+      if (typeof window !== "undefined") {
+        const raw = window.localStorage.getItem("chama_mock_db");
+        if (raw) return JSON.parse(raw);
       }
     } catch {
-      // Fallback
+      // Fallback if localStorage is inaccessible
     }
     return getInitialData();
   }
 
   public save(): void {
     try {
-      if (typeof window === "undefined") {
-        fs.writeFileSync(STORAGE_FILE, JSON.stringify(this.data, null, 2), "utf-8");
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("chama_mock_db", JSON.stringify(this.data));
       }
     } catch {
-      // Ignore write errors in readonly environments
+      // Ignore write errors in restricted iframes
     }
   }
 
